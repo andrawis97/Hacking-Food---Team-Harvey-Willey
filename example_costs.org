@@ -1,0 +1,295 @@
+* Preface
+
+First, install =CFEDemand= package if necessary:
+#+begin_src ipython 
+!pip install CFEDemands --upgrade
+
+#+end_src
+
+Then load relevant dataset:
+#+begin_src ipython :results silent :tangle costs_preface.py 
+import cfe
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+## Choose dataset ##
+USE = "ICRISAT"
+#USE = "Tanzania"
+
+# Results can be made persistent by saving them, and then re-loading...
+if USE=="ICRISAT":
+    DIR = "./IndianICRISAT/"
+    r = cfe.from_dataset(DIR+'indian_icrisat.ds')
+    USE_GOOD = 'Milk' #'Bengalgram dhal'
+elif USE=="Tanzania":
+    DIR = "./TanzanianNPS/"
+    r = cfe.from_dataset(DIR+'tanzanian_nps.ds')
+    USE_GOOD = 'Ripe Bananas'
+else:
+    raise ValueError("No such value of USE")
+
+fct = pd.read_pickle(DIR+'fct.df')
+rda = pd.read_pickle(DIR+"rda.df")
+
+# Use prices, distribution of budgets from first round, first market:
+t = r.firstround  # First round
+m = r.coords['m'][0] # First market
+
+# Distribution of predicted total expenditures
+xhat = r.get_predicted_expenditures().sum('i')
+xhat = xhat.where(xhat>0,np.nan)
+
+# Note selection of prices for first period and first market
+p = r.prices.sel(t=t,m=m).fillna(1).copy()
+
+def my_prices(p0,p=p,i=USE_GOOD):
+    p = p.copy()
+    p.loc[i] = p0
+    return p
+
+# Now fix up FCT
+
+# Change some labels in fct
+d={'protein':'Protein',
+   'protein g':'Protein',
+   'fat':'Fat',
+   'energy_kcal':'Calories',
+   'energy kcal':'Calories',
+   'calcium':'Calcium',
+   'ca mg':'Calcium',
+   'betacarotene':'Betacarotene',
+   'thiamine':'Thiamine',
+   'riboflavin':'Riboflavin',
+   'niacin':'Niacin',
+   'iron':'Iron',
+   'fe mg':'Iron',
+   'ascorbic_total':'Ascorbic Acid',
+   'vit a ug':'Vitamin A',
+   'vit b6 mg':'Vitamin B6',
+   'vit b12 ug':'Vitamin B12',
+   'vit d ug':'Vitamin D',
+   'vit e ug':'Vitamin E',
+   'vit c mg':'Vitamin C',
+   'mg mg':'Magnesium',
+   'zn mg':'Zinc'}
+
+fct = fct.rename(columns=d) #[list(d.values())]
+
+# Fix capitalization (to match food labels)
+fct.index = fct.reset_index()['Item name'].str.title()
+
+# Replace missing with zeros
+fct = fct.fillna(0)
+
+try:
+    fct.index = fct.index.droplevel('unit')
+except AttributeError: pass # No units?
+
+def nutrient_demand(x,p,z=None):
+    c = r.demands(x,p,z=z)
+    fct0,c0 = fct.align(c,axis=0,join='inner')
+    N = fct0.T@c0
+
+    return N
+
+# In first round, averaged over households and villages
+zbar = r.z.sel(t=r.firstround).mean(['j','m'])[:-1] # Leave out log HSize
+
+# This matrix product gives minimum nutrient requirements for average
+# household in first round
+hh_rda = rda.replace('',0).T@zbar
+
+def nutrient_adequacy_ratio(x,p):
+    return nutrient_demand(x,p)/hh_rda
+
+#+end_src
+
+* Simple Policy Experiments
+
+Consider two policies:  First, changing income so that some proportion
+of the population achieves nutritional adequacy.  Here choose quantile
+we're interested in (e.g., a quantile of 0.5 is the median; a quantile
+of 0.25 is the household at the 25th percentage point of the distribution).
+
+#+begin_src ipython
+
+# A quantile of 0.5 is the median.  Play with quantile value, or just assign.
+x0 = xhat.sel(t=t,m=m).quantile(0.01,'j') # Budget (median household)
+x0 = 50
+#+end_src
+
+
+#+begin_src ipython
+import matplotlib.pyplot as plt
+import numpy as np
+
+X = np.linspace(x0/10,x0*5,50)
+
+UseNutrients = ['Protein','Calories','Iron','Calcium']
+plt.plot(X,pd.concat({x:np.log(nutrient_adequacy_ratio(x,p))[UseNutrients] for x in X},axis=1).T)
+plt.legend(UseNutrients)
+plt.xlabel('Budget')
+plt.ylabel('log nutrient adequacy ratio')
+plt.axhline(0)
+plt.axvline(x0)
+#+end_src
+
+#+results:
+:results:
+# Out[3]:
+
+
+# text/plain
+: <Figure size 432x288 with 1 Axes>
+
+# image/png
+[[file:obipy-resources/756e60360b3cf57cec6422c0f6bcc791-7464xB.png]]
+:end:
+
+
+As before, we can also vary relative prices.  Here we trace out
+nutritional adequacy varying the price of a single good:
+#+begin_src ipython
+poorer_x = x0
+
+# Choose reference (t,m) for reference good
+ref_price = r.prices.sel(i=USE_GOOD,t=t,m=m)
+P = np.linspace(ref_price/10,ref_price*5,50)
+
+plt.plot(pd.concat({p0:np.log(nutrient_adequacy_ratio(poorer_x,my_prices(p0,i=USE_GOOD)))[UseNutrients] for p0 in P},axis=1).T,P)
+plt.legend(UseNutrients)
+plt.ylabel('Price')
+plt.xlabel('log nutrient adequacy ratio')
+plt.axvline(0)
+plt.axhline(p.sel(i=USE_GOOD).values)
+#+end_src
+
+#+results:
+:results:
+# Out[4]:
+
+
+# text/plain
+: <Figure size 432x288 with 1 Axes>
+
+# image/png
+[[file:obipy-resources/756e60360b3cf57cec6422c0f6bcc791-746F8H.png]]
+:end:
+
+
+#+begin_src ipython
+plt.plot([r.demands(poorer_x,my_prices(p0,i=USE_GOOD))[USE_GOOD] for p0 in P],P)
+plt.ylabel('Price')
+plt.xlabel(USE_GOOD)
+plt.axhline(p.sel(i=USE_GOOD).values)
+#+end_src
+
+#+results:
+:results:
+# Out[5]:
+
+
+# text/plain
+: <Figure size 432x288 with 1 Axes>
+
+# image/png
+[[file:obipy-resources/756e60360b3cf57cec6422c0f6bcc791-746SGO.png]]
+:end:
+
+* Compensated Policy Experiments
+
+#+begin_src ipython
+#USE_GOOD = 'Rice'
+USE_GOOD = 'Milk'
+
+U0 = r.indirect_utility(x0,p)
+
+plt.plot([r.demands(poorer_x,my_prices(p0,i=USE_GOOD))[USE_GOOD] for p0 in P],P)
+plt.plot([r.demands(U0,my_prices(p0,i=USE_GOOD),type="Hicksian")[USE_GOOD] for p0 in P],P)
+plt.ylabel('Price')
+plt.xlabel(USE_GOOD)
+#plt.axhline(p.sel(i=USE_GOOD).values)
+plt.legend(("Marshallian","Hicksian"))
+#+end_src
+
+#+results:
+:results:
+# Out[29]:
+
+
+# text/plain
+: <Figure size 432x288 with 1 Axes>
+
+# image/png
+[[file:obipy-resources/756e60360b3cf57cec6422c0f6bcc791-746Hwt.png]]
+:end:
+
+#+begin_src ipython :results silent
+def compensating_variation(U0,p0,p1):
+    x0 = r.expenditure(U0,p0)
+    x1 = r.expenditure(U0,p1)
+
+    return x1-x0
+
+def revenue(U0,p0,p1,type='Marshallian'):
+    """(Un)Compensated revenue from taxes changing vector of prices from p0 to p1.
+
+    Note that this is only for *demand* side (i.e., if supply perfectly elastic).
+    """
+    
+    dp = p1 - p0 # Change in prices
+
+    return dp.T@r.demands(U0,p1,type=type)
+
+
+def deadweight_loss(U0,p0,p1):
+    """
+    Deadweight loss of tax/subsidy scheme creating wedge in prices from p0 to p1.
+
+    Note that this is only for *demand* side (i.e., if supply perfectly elastic).
+    """
+    cv = compensating_variation(U0,p0,p1)
+
+    return revenue(U0,p0,p1,type='Hicksian') - cv
+    
+    
+def compensated_nutrient_demand(U,p,z=None):
+    c = r.demands(U,p,z=z,type='Hicksian')
+    fct0,c0 = fct.align(c,axis=0,join='inner')
+    N = fct0.T@c0
+
+    return N
+
+def compensated_nutrient_adequacy_ratio(U,p):
+    return compensated_nutrient_demand(U,p)/hh_rda
+
+#+end_src
+
+#+begin_src ipython
+fig,ax2 = plt.subplots()
+ax2.set_ylabel('log NAR')
+ax2.plot(P,[np.log(compensated_nutrient_adequacy_ratio(U0,my_prices(p0))[UseNutrients]) for p0 in P])
+ax2.legend(UseNutrients)
+ax2.axhline(0)
+ax2.set_xlabel("Price of %s" % USE_GOOD)
+#+end_src
+
+#+begin_src ipython
+fig, ax1 = plt.subplots()
+
+ax1.plot(P,[compensating_variation(U0,p,my_prices(p0)) for p0 in P])
+ax1.set_xlabel("Price of %s" % USE_GOOD)
+ax1.set_ylabel("Compensating Variation")
+
+ax1.plot(P,[revenue(U0,p,my_prices(p0)) for p0 in P],'k')
+ax1.legend(('Compensating Variation','Revenue'))
+ax1.axhline(0)
+ax1.axvline(p.loc[USE_GOOD])
+
+#+end_src
+
+
+
+
+
